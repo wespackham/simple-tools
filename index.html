@@ -133,14 +133,13 @@
       <div class="pane-bar">
         <h2>Output</h2>
         <div>
-          <button id="copy-text-btn" type="button">Copy text</button>
-          <button id="copy-html-btn" type="button">Copy HTML</button>
+          <button id="copy-btn" type="button">Copy</button>
         </div>
       </div>
       <textarea id="output" readonly spellcheck="false"></textarea>
     </div>
   </div>
-  <p class="hint">Paste rich text (e.g. from a web page or document) and the tool reads its HTML so links and formatting survive. Typing or pasting plain text works too. Copy text to keep only the content, or copy HTML to keep the markup with straightened punctuation.</p>
+  <p class="hint">Paste rich text (e.g. from Google Docs or a web page) and it comes out as clean plain text — links are kept as <code>[text](url)</code>, bold as <code>**bold**</code>, italic as <code>*italic*</code>. Typing or pasting plain text works too.</p>
 </main>
 <footer>
   Part of <a href="https://tools.abrupt.app">simple tools</a>.
@@ -155,6 +154,8 @@
     [/\u2014/g, '--'],
     [/\u2212/g, '-'],
     [/\u2026/g, '...'],
+    [/\u2039/g, '<'],
+    [/\u203A/g, '>'],
     [/\u00AB/g, '<<'],
     [/\u00BB/g, '>>'],
     [/\u00B4/g, "'"],
@@ -168,16 +169,6 @@
     return out;
   }
 
-  function straightenDocument(html) {
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
-    let node;
-    while ((node = walker.nextNode())) {
-      node.nodeValue = straighten(node.nodeValue);
-    }
-    return { html: doc.body.innerHTML, text: doc.body.textContent };
-  }
-
   const KEEP_TAGS = new Set([
     'P', 'BR', 'HR', 'A', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'DEL', 'INS',
     'UL', 'OL', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE',
@@ -189,8 +180,9 @@
     TD: ['colspan', 'rowspan'],
     TH: ['colspan', 'rowspan'],
   };
+  const BLOCK_SELECTOR = 'p,div,section,article,ul,ol,li,table,tr,blockquote,pre,hr,h1,h2,h3,h4,h5,h6,figure,figcaption,details,summary,center';
 
-  function cleanDocument(html) {
+  function sanitizeBody(html) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
     doc.querySelectorAll('script,style,meta,link,title,head,o\\:p').forEach(el => el.remove());
     const els = [];
@@ -200,10 +192,9 @@
     for (const el of els) {
       if (!el.parentNode) continue;
       const tag = el.tagName;
-      const cls = el.getAttribute('class') || '';
       const style = el.getAttribute('style') || '';
-      if (tag === 'BR' && /Apple-interchange/.test(cls)) {
-        el.remove();
+      if (tag === 'BR' && /Apple-interchange/.test(el.getAttribute('class') || '')) {
+        el.replaceWith(doc.createTextNode('\n\n'));
         continue;
       }
       if (!KEEP_TAGS.has(tag)) {
@@ -226,7 +217,149 @@
         else if (attr.name === 'href' && !/^(https?:|mailto:|#)/i.test(attr.value.trim())) el.removeAttribute('href');
       }
     }
-    return doc.body.innerHTML;
+    return doc.body;
+  }
+
+  function wrapMd(inner, mark) {
+    const core = inner.trim();
+    if (!core) return inner;
+    const lead = inner.slice(0, inner.length - inner.trimStart().length);
+    const trail = inner.slice(inner.trimEnd().length);
+    return lead + mark + core + mark + trail;
+  }
+
+  function renderInline(node) {
+    let out = '';
+    for (const child of node.childNodes) {
+      if (child.nodeType === 3) {
+        out += straighten(child.nodeValue).replace(/[ \t]*\n[ \t]*/g, ' ');
+        continue;
+      }
+      if (child.nodeType !== 1) continue;
+      const tag = child.tagName;
+      if (tag === 'BR') { out += '\n'; continue; }
+      const inner = renderInline(child);
+      switch (tag) {
+        case 'A': {
+          const href = child.getAttribute('href');
+          const text = inner.trim();
+          if (href && text) {
+            const lead = inner.slice(0, inner.length - inner.trimStart().length);
+            const trail = inner.slice(inner.trimEnd().length);
+            out += lead + '[' + text + '](' + href + ')' + trail;
+          } else {
+            out += inner;
+          }
+          break;
+        }
+        case 'B': case 'STRONG': out += wrapMd(inner, '**'); break;
+        case 'I': case 'EM': out += wrapMd(inner, '*'); break;
+        case 'CODE': out += wrapMd(inner, '`'); break;
+        case 'U': case 'S': case 'DEL': case 'INS': out += inner; break;
+        case 'IMG': {
+          const alt = child.getAttribute('alt') || '';
+          const src = child.getAttribute('src');
+          out += src ? '![' + alt + '](' + src + ')' : alt;
+          break;
+        }
+        default: out += inner;
+      }
+    }
+    return out;
+  }
+
+  function renderList(list, indent) {
+    const ordered = list.tagName === 'OL';
+    const lines = [];
+    let n = 1;
+    for (const li of list.children) {
+      if (li.tagName !== 'LI') continue;
+      let inline = '';
+      let nested = '';
+      for (const child of li.childNodes) {
+        if (child.nodeType === 3) { inline += straighten(child.nodeValue).replace(/[ \t]*\n[ \t]*/g, ' '); continue; }
+        if (child.nodeType !== 1) continue;
+        const tag = child.tagName;
+        if (tag === 'UL' || tag === 'OL') {
+          nested += '\n' + renderList(child, indent + '    ');
+        } else if (tag === 'P' || tag === 'DIV') {
+          inline += renderInline(child) + ' ';
+        } else if (tag === 'BR') {
+          inline += ' ';
+        } else {
+          inline += renderInline(child);
+        }
+      }
+      const marker = ordered ? n++ + '. ' : '- ';
+      const text = inline.replace(/\s*\n\s*/g, ' ').trim();
+      if (text || nested) lines.push(indent + marker + text + nested);
+    }
+    return lines.join('\n');
+  }
+
+  function renderTable(table) {
+    const rows = [];
+    for (const tr of table.querySelectorAll('tr')) {
+      const cells = [];
+      for (const cell of tr.children) {
+        if (cell.tagName === 'TD' || cell.tagName === 'TH') {
+          cells.push(renderInline(cell).replace(/\s*\n\s*/g, ' ').trim());
+        }
+      }
+      if (cells.length) rows.push(cells);
+    }
+    return rows.map(cells => '| ' + cells.join(' | ') + ' |').join('\n');
+  }
+
+  function renderBlocks(node) {
+    let out = '';
+    for (const child of node.childNodes) {
+      if (child.nodeType === 3) {
+        const t = straighten(child.nodeValue).replace(/[ \t]*\n[ \t]*/g, ' ').trim();
+        if (t) out += t + '\n\n';
+        continue;
+      }
+      if (child.nodeType !== 1) continue;
+      const tag = child.tagName;
+      switch (tag) {
+        case 'P': {
+          const t = renderInline(child).trim();
+          if (t) out += t + '\n\n';
+          break;
+        }
+        case 'BR': out += '\n\n'; break;
+        case 'HR': out += '---\n\n'; break;
+        case 'UL': case 'OL': out += renderList(child, '') + '\n\n'; break;
+        case 'BLOCKQUOTE': {
+          const inner = renderBlocks(child).trim();
+          if (inner) out += inner.split('\n').map(l => '> ' + l).join('\n') + '\n\n';
+          break;
+        }
+        case 'PRE': out += '```\n' + straighten(child.textContent) + '\n```\n\n'; break;
+        case 'TABLE': out += renderTable(child) + '\n\n'; break;
+        case 'H1': case 'H2': case 'H3': case 'H4': case 'H5': case 'H6': {
+          const t = renderInline(child).trim();
+          if (t) out += '#'.repeat(+tag[1]) + ' ' + t + '\n\n';
+          break;
+        }
+        case 'IMG': {
+          const alt = child.getAttribute('alt') || '';
+          const src = child.getAttribute('src');
+          if (src) out += '![' + alt + '](' + src + ')\n\n';
+          else if (alt) out += alt + '\n\n';
+          break;
+        }
+        default: {
+          if (child.querySelector(BLOCK_SELECTOR)) {
+            out += renderBlocks(child);
+          } else {
+            const t = renderInline(child).trim();
+            if (t) out += t + '\n\n';
+          }
+        }
+      }
+    }
+    return out.replace(/\n{3,}/g, '\n\n').trim();
   }
 
   const input = document.getElementById('input');
@@ -242,8 +375,7 @@
       return;
     }
     if (/^\s*</.test(value) && /<\/?[a-z][\s\S]*>/i.test(value)) {
-      const result = straightenDocument(value);
-      output.value = result.html;
+      output.value = renderBlocks(sanitizeBody(value));
     } else {
       output.value = straighten(value);
     }
@@ -255,7 +387,7 @@
     const html = e.clipboardData && e.clipboardData.getData('text/html');
     if (!html) return;
     e.preventDefault();
-    input.value = cleanDocument(html);
+    input.value = renderBlocks(sanitizeBody(html));
     convert();
   });
 
@@ -265,7 +397,7 @@
       for (const item of items) {
         if (item.types.includes('text/html')) {
           const blob = await item.getType('text/html');
-          input.value = cleanDocument(await blob.text());
+          input.value = renderBlocks(sanitizeBody(await blob.text()));
         } else if (item.types.includes('text/plain')) {
           const blob = await item.getType('text/plain');
           input.value = await blob.text();
@@ -304,12 +436,7 @@
     lastSource = null;
     input.focus();
   });
-  document.getElementById('copy-text-btn').addEventListener('click', (e) => {
-    const doc = new DOMParser().parseFromString('<body>' + output.value, 'text/html');
-    const text = doc.body.textContent.replace(/\s*\n+\s*/g, ' ').trim();
-    copy(text || output.value, e.target);
-  });
-  document.getElementById('copy-html-btn').addEventListener('click', (e) => {
+  document.getElementById('copy-btn').addEventListener('click', (e) => {
     copy(output.value, e.target);
   });
 })();
