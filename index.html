@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Straighten Punctuation — Simple Tools</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --fg: #1c1917;
+    --muted: #78716c;
+    --border: #e7e5e4;
+    --accent: #1c1917;
+    --radius: 8px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1917;
+      --fg: #fafaf9;
+      --muted: #a8a29e;
+      --border: #44403c;
+      --accent: #fafaf9;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.5;
+  }
+  header {
+    max-width: 56rem;
+    margin: 0 auto;
+    padding: 2.5rem 1.5rem 0;
+  }
+  header h1 { font-size: 1.5rem; margin: 0 0 0.25rem; }
+  header p { margin: 0; color: var(--muted); }
+  main {
+    max-width: 56rem;
+    margin: 0 auto;
+    padding: 1.5rem;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+  }
+  @media (max-width: 48rem) {
+    .grid { grid-template-columns: 1fr; }
+  }
+  .pane {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .pane-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--border) 40%, transparent);
+  }
+  .pane-bar h2 {
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    margin: 0;
+  }
+  textarea {
+    border: 0;
+    padding: 0.75rem;
+    min-height: 18rem;
+    resize: vertical;
+    background: transparent;
+    color: inherit;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.875rem;
+    line-height: 1.6;
+  }
+  textarea:focus { outline: none; }
+  button {
+    font: inherit;
+    font-size: 0.8rem;
+    padding: 0.3rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--fg); }
+  .hint {
+    color: var(--muted);
+    font-size: 0.8rem;
+    margin: 0.75rem 0 0;
+  }
+  footer {
+    max-width: 56rem;
+    margin: 0 auto;
+    padding: 2rem 1.5rem;
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Straighten Punctuation</h1>
+  <p>Convert curly quotes, dashes, and ellipses to straight equivalents. Links and formatting are preserved.</p>
+</header>
+<main>
+  <div class="grid">
+    <div class="pane">
+      <div class="pane-bar">
+        <h2>Input</h2>
+        <div>
+          <button id="paste-btn" type="button">Paste</button>
+          <button id="clear-btn" type="button">Clear</button>
+        </div>
+      </div>
+      <textarea id="input" placeholder="Paste rich text (with formatting) or HTML source here, or type plain text…" spellcheck="false"></textarea>
+    </div>
+    <div class="pane">
+      <div class="pane-bar">
+        <h2>Output</h2>
+        <div>
+          <button id="copy-text-btn" type="button">Copy text</button>
+          <button id="copy-html-btn" type="button">Copy HTML</button>
+        </div>
+      </div>
+      <textarea id="output" readonly spellcheck="false"></textarea>
+    </div>
+  </div>
+  <p class="hint">Paste rich text (e.g. from a web page or document) and the tool reads its HTML so links and formatting survive. Typing or pasting plain text works too. Copy text to keep only the content, or copy HTML to keep the markup with straightened punctuation.</p>
+</main>
+<footer>
+  Part of <a href="https://tools.abrupt.app">simple tools</a>.
+</footer>
+
+<script>
+(function () {
+  const CURLY_MAP = [
+    [/[\u2018\u2019\u201A\u201B\u2032\uFF07]/g, "'"],
+    [/[\u201C\u201D\u201E\u201F\u2033\uFF02]/g, '"'],
+    [/\u2013/g, '-'],
+    [/\u2014/g, '--'],
+    [/\u2212/g, '-'],
+    [/\u2026/g, '...'],
+    [/\u00AB/g, '<<'],
+    [/\u00BB/g, '>>'],
+    [/\u00B4/g, "'"],
+    [/\uFF07/g, "'"],
+    [/\uFF02/g, '"'],
+  ];
+
+  function straighten(text) {
+    let out = text;
+    for (const [re, replacement] of CURLY_MAP) out = out.replace(re, replacement);
+    return out;
+  }
+
+  function straightenDocument(html) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      node.nodeValue = straighten(node.nodeValue);
+    }
+    return { html: doc.body.innerHTML, text: doc.body.textContent };
+  }
+
+  const input = document.getElementById('input');
+  const output = document.getElementById('output');
+  let lastSource = null;
+
+  function convert() {
+    const value = input.value;
+    if (value === lastSource) return;
+    lastSource = value;
+    if (!value) {
+      output.value = '';
+      return;
+    }
+    if (/^\s*</.test(value) && /<\/?[a-z][\s\S]*>/i.test(value)) {
+      const result = straightenDocument(value);
+      output.value = result.html;
+    } else {
+      output.value = straighten(value);
+    }
+  }
+
+  input.addEventListener('input', convert);
+
+  input.addEventListener('paste', (e) => {
+    const html = e.clipboardData && e.clipboardData.getData('text/html');
+    if (!html) return;
+    e.preventDefault();
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    input.value = doc.body.innerHTML;
+    convert();
+  });
+
+  async function pasteFromClipboard() {
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        if (item.types.includes('text/html')) {
+          const blob = await item.getType('text/html');
+          const html = await blob.text();
+          const doc = new DOMParser().parseFromString(html, 'text/html');
+          input.value = doc.body.innerHTML;
+        } else if (item.types.includes('text/plain')) {
+          const blob = await item.getType('text/plain');
+          input.value = await blob.text();
+        }
+        convert();
+        return;
+      }
+    } catch (e) {
+      input.focus();
+    }
+  }
+
+  function copy(value, button) {
+    const original = button.textContent;
+    function done(ok) {
+      button.textContent = ok ? 'Copied' : 'Failed';
+      setTimeout(() => { button.textContent = original; }, 1200);
+    }
+    if (navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(value).then(() => done(true), () => done(false));
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = value;
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      done(ok);
+    }
+  }
+
+  document.getElementById('paste-btn').addEventListener('click', pasteFromClipboard);
+  document.getElementById('clear-btn').addEventListener('click', () => {
+    input.value = '';
+    output.value = '';
+    lastSource = null;
+    input.focus();
+  });
+  document.getElementById('copy-text-btn').addEventListener('click', (e) => {
+    const doc = new DOMParser().parseFromString('<body>' + output.value, 'text/html');
+    copy(doc.body.textContent || output.value, e.target);
+  });
+  document.getElementById('copy-html-btn').addEventListener('click', (e) => {
+    copy(output.value, e.target);
+  });
+})();
+</script>
+</body>
+</html>
