@@ -42,14 +42,6 @@
     margin: 0 auto;
     padding: 1.5rem;
   }
-  .grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 1rem;
-  }
-  @media (max-width: 48rem) {
-    .grid { grid-template-columns: 1fr; }
-  }
   .pane {
     display: flex;
     flex-direction: column;
@@ -74,18 +66,17 @@
     color: var(--muted);
     margin: 0;
   }
-  textarea {
-    border: 0;
-    padding: 0.75rem;
-    min-height: 18rem;
-    resize: vertical;
-    background: transparent;
-    color: inherit;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.875rem;
-    line-height: 1.6;
+  #editor {
+    min-height: 20rem;
+    padding: 1rem;
+    outline: none;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
   }
-  textarea:focus { outline: none; }
+  #editor:empty::before {
+    content: attr(data-placeholder);
+    color: var(--muted);
+  }
   button {
     font: inherit;
     font-size: 0.8rem;
@@ -115,31 +106,21 @@
 <body>
 <header>
   <h1>Straighten Punctuation</h1>
-  <p>Convert curly quotes, dashes, and ellipses to straight equivalents. Links and formatting are preserved.</p>
+  <p>Convert curly quotes, dashes, and ellipses to straight equivalents while keeping formatting and hyperlinks intact.</p>
 </header>
 <main>
-  <div class="grid">
-    <div class="pane">
-      <div class="pane-bar">
-        <h2>Input</h2>
-        <div>
-          <button id="paste-btn" type="button">Paste</button>
-          <button id="clear-btn" type="button">Clear</button>
-        </div>
+  <div class="pane">
+    <div class="pane-bar">
+      <h2>Document</h2>
+      <div>
+        <button id="paste-btn" type="button">Paste</button>
+        <button id="copy-btn" type="button">Copy</button>
+        <button id="clear-btn" type="button">Clear</button>
       </div>
-      <textarea id="input" placeholder="Paste rich text (with formatting) or HTML source here, or type plain text…" spellcheck="false"></textarea>
     </div>
-    <div class="pane">
-      <div class="pane-bar">
-        <h2>Output</h2>
-        <div>
-          <button id="copy-btn" type="button">Copy</button>
-        </div>
-      </div>
-      <textarea id="output" readonly spellcheck="false"></textarea>
-    </div>
+    <div id="editor" contenteditable="true" data-placeholder="Paste here from Google Docs, Word, or any editor — or type. Then Copy and paste into your document." spellcheck="false"></div>
   </div>
-  <p class="hint">Paste rich text (e.g. from Google Docs or a web page) and it comes out as clean plain text — links are kept as <code>[text](url)</code>, bold as <code>**bold**</code>, italic as <code>*italic*</code>. Typing or pasting plain text works too.</p>
+  <p class="hint">Paste in rich text (formatting and links are kept), punctuation is straightened automatically, then copy it back out as rich text to paste into another document. Copy as plain text with Ctrl/Cmd+Shift+V where the target allows.</p>
 </main>
 <footer>
   Part of <a href="https://tools.abrupt.app">simple tools</a>.
@@ -169,10 +150,21 @@
     return out;
   }
 
+  function straightenTree(root) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    let node;
+    while ((node = walker.nextNode())) nodes.push(node);
+    for (const n of nodes) {
+      const fixed = straighten(n.nodeValue);
+      if (fixed !== n.nodeValue) n.nodeValue = fixed;
+    }
+  }
+
   const KEEP_TAGS = new Set([
     'P', 'BR', 'HR', 'A', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'DEL', 'INS',
     'UL', 'OL', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE',
-    'PRE', 'CODE', 'IMG', 'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TD', 'TH',
+    'PRE', 'CODE', 'IMG', 'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TD', 'TH', 'SPAN',
   ]);
   const KEEP_ATTRS = {
     A: ['href', 'title', 'target'],
@@ -180,7 +172,6 @@
     TD: ['colspan', 'rowspan'],
     TH: ['colspan', 'rowspan'],
   };
-  const BLOCK_SELECTOR = 'p,div,section,article,ul,ol,li,table,tr,blockquote,pre,hr,h1,h2,h3,h4,h5,h6,figure,figcaption,details,summary,center';
 
   function sanitizeBody(html) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -192,13 +183,13 @@
     for (const el of els) {
       if (!el.parentNode) continue;
       const tag = el.tagName;
-      const style = el.getAttribute('style') || '';
       if (tag === 'BR' && /Apple-interchange/.test(el.getAttribute('class') || '')) {
-        el.replaceWith(doc.createTextNode('\n\n'));
+        el.replaceWith(doc.createElement('br'));
         continue;
       }
       if (!KEEP_TAGS.has(tag)) {
         const frag = doc.createDocumentFragment();
+        const style = el.getAttribute('style') || '';
         const weight = /font-weight:\s*(\d{3})/i.exec(style);
         const bold = weight && parseInt(weight[1], 10) >= 600;
         const italic = /font-style:\s*italic/i.test(style);
@@ -220,176 +211,37 @@
     return doc.body;
   }
 
-  function wrapMd(inner, mark) {
-    const core = inner.trim();
-    if (!core) return inner;
-    const lead = inner.slice(0, inner.length - inner.trimStart().length);
-    const trail = inner.slice(inner.trimEnd().length);
-    return lead + mark + core + mark + trail;
-  }
+  const editor = document.getElementById('editor');
 
-  function renderInline(node) {
-    let out = '';
-    for (const child of node.childNodes) {
-      if (child.nodeType === 3) {
-        out += straighten(child.nodeValue).replace(/[ \t]*\n[ \t]*/g, ' ');
-        continue;
-      }
-      if (child.nodeType !== 1) continue;
-      const tag = child.tagName;
-      if (tag === 'BR') { out += '\n'; continue; }
-      const inner = renderInline(child);
-      switch (tag) {
-        case 'A': {
-          const href = child.getAttribute('href');
-          const text = inner.trim();
-          if (href && text) {
-            const lead = inner.slice(0, inner.length - inner.trimStart().length);
-            const trail = inner.slice(inner.trimEnd().length);
-            out += lead + '[' + text + '](' + href + ')' + trail;
-          } else {
-            out += inner;
-          }
-          break;
-        }
-        case 'B': case 'STRONG': out += wrapMd(inner, '**'); break;
-        case 'I': case 'EM': out += wrapMd(inner, '*'); break;
-        case 'CODE': out += wrapMd(inner, '`'); break;
-        case 'U': case 'S': case 'DEL': case 'INS': out += inner; break;
-        case 'IMG': {
-          const alt = child.getAttribute('alt') || '';
-          const src = child.getAttribute('src');
-          out += src ? '![' + alt + '](' + src + ')' : alt;
-          break;
-        }
-        default: out += inner;
-      }
-    }
-    return out;
-  }
+  editor.addEventListener('input', () => straightenTree(editor));
 
-  function renderList(list, indent) {
-    const ordered = list.tagName === 'OL';
-    const lines = [];
-    let n = 1;
-    for (const li of list.children) {
-      if (li.tagName !== 'LI') continue;
-      let inline = '';
-      let nested = '';
-      for (const child of li.childNodes) {
-        if (child.nodeType === 3) { inline += straighten(child.nodeValue).replace(/[ \t]*\n[ \t]*/g, ' '); continue; }
-        if (child.nodeType !== 1) continue;
-        const tag = child.tagName;
-        if (tag === 'UL' || tag === 'OL') {
-          nested += '\n' + renderList(child, indent + '    ');
-        } else if (tag === 'P' || tag === 'DIV') {
-          inline += renderInline(child) + ' ';
-        } else if (tag === 'BR') {
-          inline += ' ';
-        } else {
-          inline += renderInline(child);
-        }
-      }
-      const marker = ordered ? n++ + '. ' : '- ';
-      const text = inline.replace(/\s*\n\s*/g, ' ').trim();
-      if (text || nested) lines.push(indent + marker + text + nested);
-    }
-    return lines.join('\n');
-  }
-
-  function renderTable(table) {
-    const rows = [];
-    for (const tr of table.querySelectorAll('tr')) {
-      const cells = [];
-      for (const cell of tr.children) {
-        if (cell.tagName === 'TD' || cell.tagName === 'TH') {
-          cells.push(renderInline(cell).replace(/\s*\n\s*/g, ' ').trim());
-        }
-      }
-      if (cells.length) rows.push(cells);
-    }
-    return rows.map(cells => '| ' + cells.join(' | ') + ' |').join('\n');
-  }
-
-  function renderBlocks(node) {
-    let out = '';
-    for (const child of node.childNodes) {
-      if (child.nodeType === 3) {
-        const t = straighten(child.nodeValue).replace(/[ \t]*\n[ \t]*/g, ' ').trim();
-        if (t) out += t + '\n\n';
-        continue;
-      }
-      if (child.nodeType !== 1) continue;
-      const tag = child.tagName;
-      switch (tag) {
-        case 'P': {
-          const t = renderInline(child).trim();
-          if (t) out += t + '\n\n';
-          break;
-        }
-        case 'BR': out += '\n\n'; break;
-        case 'HR': out += '---\n\n'; break;
-        case 'UL': case 'OL': out += renderList(child, '') + '\n\n'; break;
-        case 'BLOCKQUOTE': {
-          const inner = renderBlocks(child).trim();
-          if (inner) out += inner.split('\n').map(l => '> ' + l).join('\n') + '\n\n';
-          break;
-        }
-        case 'PRE': out += '```\n' + straighten(child.textContent) + '\n```\n\n'; break;
-        case 'TABLE': out += renderTable(child) + '\n\n'; break;
-        case 'H1': case 'H2': case 'H3': case 'H4': case 'H5': case 'H6': {
-          const t = renderInline(child).trim();
-          if (t) out += '#'.repeat(+tag[1]) + ' ' + t + '\n\n';
-          break;
-        }
-        case 'IMG': {
-          const alt = child.getAttribute('alt') || '';
-          const src = child.getAttribute('src');
-          if (src) out += '![' + alt + '](' + src + ')\n\n';
-          else if (alt) out += alt + '\n\n';
-          break;
-        }
-        default: {
-          if (child.querySelector(BLOCK_SELECTOR)) {
-            out += renderBlocks(child);
-          } else {
-            const t = renderInline(child).trim();
-            if (t) out += t + '\n\n';
-          }
-        }
-      }
-    }
-    return out.replace(/\n{3,}/g, '\n\n').trim();
-  }
-
-  const input = document.getElementById('input');
-  const output = document.getElementById('output');
-  let lastSource = null;
-
-  function convert() {
-    const value = input.value;
-    if (value === lastSource) return;
-    lastSource = value;
-    if (!value) {
-      output.value = '';
-      return;
-    }
-    if (/^\s*</.test(value) && /<\/?[a-z][\s\S]*>/i.test(value)) {
-      output.value = renderBlocks(sanitizeBody(value));
-    } else {
-      output.value = straighten(value);
-    }
-  }
-
-  input.addEventListener('input', convert);
-
-  input.addEventListener('paste', (e) => {
-    const html = e.clipboardData && e.clipboardData.getData('text/html');
-    if (!html) return;
+  editor.addEventListener('paste', (e) => {
     e.preventDefault();
-    input.value = renderBlocks(sanitizeBody(html));
-    convert();
+    const html = e.clipboardData && e.clipboardData.getData('text/html');
+    if (html) {
+      const body = sanitizeBody(html);
+      straightenTree(body);
+      insertHtml(body.innerHTML);
+    } else {
+      const text = e.clipboardData.getData('text/plain') || '';
+      if (text) insertHtml(escapeHtml(straighten(text)).replace(/\n/g, '<br>'));
+    }
   });
+
+  function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function insertHtml(html) {
+    editor.focus();
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount && editor.contains(sel.getRangeAt(0).commonAncestorContainer)) {
+      document.execCommand('insertHTML', false, html);
+    } else {
+      editor.innerHTML = html;
+    }
+    straightenTree(editor);
+  }
 
   async function pasteFromClipboard() {
     try {
@@ -397,47 +249,52 @@
       for (const item of items) {
         if (item.types.includes('text/html')) {
           const blob = await item.getType('text/html');
-          input.value = renderBlocks(sanitizeBody(await blob.text()));
+          insertHtml(sanitizeBody(await blob.text()).innerHTML);
         } else if (item.types.includes('text/plain')) {
           const blob = await item.getType('text/plain');
-          input.value = await blob.text();
+          insertHtml(escapeHtml(await blob.text()).replace(/\n/g, '<br>'));
         }
-        convert();
         return;
       }
     } catch (e) {
-      input.focus();
+      editor.focus();
     }
   }
 
-  function copy(value, button) {
+  function copyRich(button) {
     const original = button.textContent;
     function done(ok) {
       button.textContent = ok ? 'Copied' : 'Failed';
       setTimeout(() => { button.textContent = original; }, 1200);
     }
-    if (navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(value).then(() => done(true), () => done(false));
-    } else {
-      const ta = document.createElement('textarea');
-      ta.value = value;
-      document.body.appendChild(ta);
-      ta.select();
+    const html = editor.innerHTML;
+    const text = editor.innerText;
+    function fallback() {
+      const range = document.createRange();
+      range.selectNodeContents(editor);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
       const ok = document.execCommand('copy');
-      ta.remove();
+      sel.removeAllRanges();
       done(ok);
+    }
+    if (navigator.clipboard && window.ClipboardItem) {
+      const item = new ClipboardItem({
+        'text/html': new Blob([html], { type: 'text/html' }),
+        'text/plain': new Blob([text], { type: 'text/plain' }),
+      });
+      navigator.clipboard.write([item]).then(() => done(true), () => done(false));
+    } else {
+      fallback();
     }
   }
 
   document.getElementById('paste-btn').addEventListener('click', pasteFromClipboard);
+  document.getElementById('copy-btn').addEventListener('click', (e) => copyRich(e.target));
   document.getElementById('clear-btn').addEventListener('click', () => {
-    input.value = '';
-    output.value = '';
-    lastSource = null;
-    input.focus();
-  });
-  document.getElementById('copy-btn').addEventListener('click', (e) => {
-    copy(output.value, e.target);
+    editor.innerHTML = '';
+    editor.focus();
   });
 })();
 </script>
