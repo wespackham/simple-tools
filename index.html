@@ -94,6 +94,33 @@
     cursor: pointer;
   }
   button:hover { border-color: var(--fg); }
+  .pane-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.8rem;
+    color: var(--muted);
+    cursor: pointer;
+    user-select: none;
+  }
+  .toggle input { margin: 0; cursor: pointer; accent-color: var(--fg); }
+  ::highlight(chg-punct) { background-color: #fde68a; }
+  ::highlight(chg-space) { background-color: #bfdbfe; }
+  .sw {
+    display: inline-block;
+    width: 0.75em;
+    height: 0.75em;
+    border-radius: 2px;
+    vertical-align: -1px;
+    margin: 0 0.15rem 0 0.4rem;
+  }
+  .sw-p { background: #fde68a; }
+  .sw-s { background: #bfdbfe; }
   .hint {
     color: var(--muted);
     font-size: 0.8rem;
@@ -112,14 +139,15 @@
 <body>
 <header>
   <h1>Straighten Punctuation</h1>
-  <p>Convert curly quotes, dashes, and ellipses to straight equivalents. All other formatting stays identical.</p>
+  <p>Convert curly quotes, dashes, and ellipses to straight equivalents. All other formatting stays identical — and runs of spaces can be collapsed with the toggle below.</p>
 </header>
 <main>
   <div class="grid">
     <div class="pane">
       <div class="pane-bar">
         <h2>Input</h2>
-        <div>
+        <div class="pane-actions">
+          <label class="toggle" title="Collapse runs of multiple spaces into one"><input type="checkbox" id="compress-spaces" checked> Compress spaces</label>
           <button id="paste-btn" type="button">Paste</button>
           <button id="clear-btn" type="button">Clear</button>
         </div>
@@ -136,7 +164,7 @@
       <div id="output" class="surface" aria-live="polite"></div>
     </div>
   </div>
-  <p class="hint">Paste or type on the left — punctuation is straightened on the right with fonts, sizes, and links untouched. Copy the result and paste it into your document; it arrives as rich text, not HTML.</p>
+  <p class="hint">Paste or type on the left — punctuation is straightened on the right with fonts, sizes, and links untouched. Copy the result and paste it into your document; it arrives as rich text, not HTML. Highlights show what changed: <span class="sw sw-p"></span>punctuation <span class="sw sw-s"></span>spaces</p>
 </main>
 <footer>
   Part of <a href="https://tools.abrupt.app">simple tools</a>.
@@ -160,39 +188,154 @@
     [/\uFF02/g, '"'],
   ];
 
-  function straighten(text) {
+  function straighten(text, compress) {
     let out = text;
     for (const [re, replacement] of CURLY_MAP) out = out.replace(re, replacement);
+    if (compress) out = out.replace(/ {2,}/g, ' ');
     return out;
   }
 
-  const input = document.getElementById('input');
-  const output = document.getElementById('output');
-
-  function straightenTree(root) {
+  // Marker-free straighten pass over text nodes only (defensive; used before copy).
+  function straightenTree(root, compress) {
     const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     const nodes = [];
     let node;
     while ((node = walker.nextNode())) nodes.push(node);
     for (const n of nodes) {
-      const fixed = straighten(n.nodeValue);
+      const fixed = straighten(n.nodeValue, compress);
       if (fixed !== n.nodeValue) n.nodeValue = fixed;
     }
   }
 
+  const input = document.getElementById('input');
+  const output = document.getElementById('output');
+  const compressToggle = document.getElementById('compress-spaces');
+
+  function buildMatcher(compress) {
+    const sources = CURLY_MAP.map(([re]) => re.source);
+    if (compress) sources.push(' {2,}');
+    return new RegExp(sources.map(s => '(?:' + s + ')').join('|'), 'g');
+  }
+
+  // Split text into segments: unchanged, or changed with type + replacement.
+  function segment(text, re) {
+    const segs = [];
+    re.lastIndex = 0;
+    let last = 0, m;
+    while ((m = re.exec(text))) {
+      if (m.index > last) segs.push({ text: text.slice(last, m.index), change: null });
+      const matched = m[0];
+      const isSpace = /^ {2,}$/.test(matched);
+      let replacement = matched;
+      if (isSpace) {
+        replacement = ' ';
+      } else {
+        for (const [r, rep] of CURLY_MAP) {
+          r.lastIndex = 0;
+          if (r.test(matched)) { replacement = rep; break; }
+        }
+      }
+      segs.push({ text: matched, change: isSpace ? 'space' : 'punct', replacement });
+      last = re.lastIndex;
+    }
+    if (last < text.length) segs.push({ text: text.slice(last), change: null });
+    return segs;
+  }
+
+  // Straighten + (optionally) compress text nodes, wrapping each change in a
+  // span.chg-p / span.chg-s marker so positions can be highlighted later.
+  function transformTree(root, compress) {
+    const re = buildMatcher(compress);
+    const doc = root.ownerDocument;
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    let node;
+    while ((node = walker.nextNode())) nodes.push(node);
+    for (const n of nodes) {
+      const segs = segment(n.nodeValue, re);
+      if (!segs.some(s => s.change)) continue;
+      const frag = doc.createDocumentFragment();
+      for (const s of segs) {
+        if (!s.change) {
+          frag.appendChild(doc.createTextNode(s.text));
+        } else {
+          const span = doc.createElement('span');
+          span.className = s.change === 'space' ? 'chg-s' : 'chg-p';
+          span.textContent = s.replacement;
+          frag.appendChild(span);
+        }
+      }
+      n.parentNode.replaceChild(frag, n);
+    }
+  }
+
+  // Unwrap change markers in the live output, returning ranges over the text
+  // they held (the markers must not survive into copied content).
+  function collectChangeRanges(container) {
+    const ranges = { punct: [], space: [] };
+    container.querySelectorAll('span.chg-p, span.chg-s').forEach(span => {
+      const r = document.createRange();
+      r.selectNodeContents(span);
+      ranges[span.classList.contains('chg-s') ? 'space' : 'punct'].push(r);
+      while (span.firstChild) span.parentNode.insertBefore(span.firstChild, span);
+      span.remove();
+    });
+    return ranges;
+  }
+
+  // Ranges over the input's original curly characters / space runs.
+  function collectInputRanges(compress) {
+    const re = buildMatcher(compress);
+    const ranges = { punct: [], space: [] };
+    const walker = input.ownerDocument.createTreeWalker(input, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      const text = node.nodeValue;
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(text))) {
+        const r = input.ownerDocument.createRange();
+        r.setStart(node, m.index);
+        r.setEnd(node, m.index + m[0].length);
+        ranges[/^ {2,}$/.test(m[0]) ? 'space' : 'punct'].push(r);
+      }
+    }
+    return ranges;
+  }
+
+  function applyHighlights(ranges) {
+    if (typeof CSS === 'undefined' || !CSS.highlights || typeof Highlight === 'undefined') return;
+    CSS.highlights.set('chg-punct', new Highlight(...ranges.punct));
+    CSS.highlights.set('chg-space', new Highlight(...ranges.space));
+  }
+
+  function clearHighlights() {
+    if (typeof CSS === 'undefined' || !CSS.highlights) return;
+    CSS.highlights.delete('chg-punct');
+    CSS.highlights.delete('chg-space');
+  }
+
   function convert() {
-    const html = input.innerHTML;
+    const compress = compressToggle.checked;
     if (!input.textContent.trim()) {
       output.innerHTML = '';
+      clearHighlights();
       return;
     }
-    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const doc = new DOMParser().parseFromString(input.innerHTML, 'text/html');
     doc.querySelectorAll('script,style,meta,link,o\\:p').forEach(el => el.remove());
-    straightenTree(doc.body);
+    transformTree(doc.body, compress);
     output.innerHTML = doc.body.innerHTML;
+    const inRanges = collectInputRanges(compress);
+    const outRanges = collectChangeRanges(output);
+    applyHighlights({
+      punct: inRanges.punct.concat(outRanges.punct),
+      space: inRanges.space.concat(outRanges.space),
+    });
   }
 
   input.addEventListener('input', convert);
+  compressToggle.addEventListener('change', convert);
 
   input.addEventListener('paste', (e) => {
     e.preventDefault();
@@ -202,11 +345,10 @@
       doc.querySelectorAll('script,style,meta,link,title,head').forEach(el => el.remove());
       const br = doc.querySelector('br[class*="Apple-interchange"]');
       if (br) br.remove();
-      straightenTree(doc.body);
       insertAtCaret(doc.body.innerHTML);
     } else {
       const text = (e.clipboardData.getData('text/plain') || '').replace(/</g, '&lt;');
-      insertAtCaret(straighten(text).replace(/\n/g, '<br>'));
+      insertAtCaret(text.replace(/\n/g, '<br>'));
     }
   });
 
@@ -232,11 +374,10 @@
           doc.querySelectorAll('script,style,meta,link,title,head').forEach(el => el.remove());
           const br = doc.querySelector('br[class*="Apple-interchange"]');
           if (br) br.remove();
-          straightenTree(doc.body);
           input.innerHTML = doc.body.innerHTML;
         } else if (item.types.includes('text/plain')) {
           const blob = await item.getType('text/plain');
-          input.innerHTML = straighten(await blob.text()).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>');
+          input.innerHTML = (await blob.text()).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>');
         }
         convert();
         return;
@@ -254,7 +395,7 @@
       setTimeout(() => { button.textContent = original; }, 1200);
     }
     const parsed = new DOMParser().parseFromString(output.innerHTML, 'text/html');
-    straightenTree(parsed.body);
+    straightenTree(parsed.body, compressToggle.checked);
     const html = parsed.body.innerHTML;
     const text = parsed.body.textContent.replace(/\s*\n+\s*/g, ' ').trim();
     function fallback() {
@@ -283,6 +424,7 @@
   document.getElementById('clear-btn').addEventListener('click', () => {
     input.innerHTML = '';
     output.innerHTML = '';
+    clearHighlights();
     input.focus();
   });
 })();
